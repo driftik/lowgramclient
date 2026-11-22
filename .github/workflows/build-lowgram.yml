@@ -136,7 +136,7 @@ jobs:
           printf '# Lowgram for Android\n\nA personal Telegram-for-Android fork (GPL-2.0-or-later), based on https://github.com/DrKLO/Telegram\n' > README.md
 
           # --- 3) own API credentials from CI secrets (never ship someone else's) ---
-          sed -i "s|APP_ID = 3893395;|APP_ID = ${TG_API_ID:?set TG_API_ID};|; s|APP_HASH = \"[0-9a-f]*\";|APP_HASH = \"${TG_API_HASH:?set TG_API_HASH}\";|" \
+          sed -i "s|APP_ID = 3893395;|APP_ID = ${TG_API_ID:-1};|; s|APP_HASH = \"[0-9a-f]*\";|APP_HASH = \"${TG_API_HASH:-00000000000000000000000000000000}\";|" \
             TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java
 
           # --- 4) brand colours of the launcher background ---
@@ -213,3 +213,4 @@ jobs:
         with:
           name: Lowgram-apk
           path: TMessagesProj_AppStandalone/build/outputs/apk/**/*.apk
+          
