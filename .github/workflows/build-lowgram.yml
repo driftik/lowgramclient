@@ -1,64 +1,215 @@
-name: Build LowGram APK
+name: Build Lowgram APK
 
 on:
-  workflow_dispatch: # Запуск вручную по кнопке
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    env:
-      OWPENGRAM_BUILD: "0" # Отключает проверку обновлений от OwpenGram
-
+    timeout-minutes: 120
     steps:
-      - name: Скачиваем код
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android/sdk/ndk/25* /usr/local/share/boost || true
+          df -h /
+
+      - name: Checkout source (GPL-2.0 Telegram fork, pinned commit)
         uses: actions/checkout@v4
         with:
+          repository: owpengram/owpengram-android-client
+          ref: 4b3ac1446f14cb8edd793a602b2d85200402617f
           submodules: recursive
 
-      - name: Ставим JDK 17
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
+          distribution: temurin
           java-version: '17'
 
-      - name: Ставим Android SDK 36 и NDK 27.2
+      - name: Android SDK / NDK
         run: |
-          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
-          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager \
-            "platforms;android-36" \
-            "build-tools;36.0.0" \
-            "ndk;27.2.12479018"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018" "cmake;3.22.1" "platform-tools"
 
-      - name: Переименовываем в LowGram
+      - name: Lowgram icons
         run: |
-          # 1. Меняем applicationId, чтобы ставился отдельно от Telegram и OwpenGram
-          sed -i 's/applicationId "[^"]*"/applicationId "com.lowgram.messenger"/g' TMessagesProj_AppStandalone/build.gradle
-          
-          # 2. Меняем отображаемое имя в ресурсах (английский, русский и остальные)
-          find TMessagesProj/src/main/res -name "strings.xml" -exec sed -i 's/OwpenGram/LowGram/g' {} +
-          
-          # 3. Меняем схему диплинков owpg:// на lowg://
-          find TMessagesProj TMessagesProj_AppStandalone -name "AndroidManifest.xml" -exec sed -i 's/android:scheme="owpg"/android:scheme="lowg"/g' {} +
+          pip install pillow
+          cat > mkicon.py <<'ICON_EOF'
+          from PIL import Image, ImageDraw
+          import sys, os
 
-      - name: Генерируем ключ подписи (keystore)
+          def gradient(size, c1, c2):
+              img = Image.new("RGB", (size, size))
+              px = img.load()
+              for y in range(size):
+                  for x in range(size):
+                      t = (x + y) / (2 * (size - 1))
+                      px[x, y] = tuple(int(c1[i] + (c2[i] - c1[i]) * t) for i in range(3))
+              return img
+
+          def logo(size, bg=False, pad=0.0):
+              """Speech bubble with a bold 'L'. S = supersampled canvas."""
+              S = size * 4
+              img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+              d = ImageDraw.Draw(img)
+              # bubble area (leave safe zone for adaptive icons)
+              m = S * (0.25 + pad)
+              L, T, R, B = m, m, S - m, S - m * 1.12
+              r = (R - L) * 0.28
+              d.rounded_rectangle([L, T, R, B], radius=r, fill=(255, 255, 255, 255))
+              # tail bottom-left
+              tx = L + (R - L) * 0.16
+              d.polygon([(tx, B - 2), (tx + (R - L) * 0.22, B - 2), (tx - (R - L) * 0.06, B + (R - L) * 0.2)],
+                        fill=(255, 255, 255, 255))
+              # the letter L, in brand colour
+              w = R - L
+              stem_x = L + w * 0.33
+              stem_w = w * 0.15
+              top = T + (B - T) * 0.2
+              bot = T + (B - T) * 0.8
+              foot_w = w * 0.36
+              col = (124, 58, 237, 255)
+              d.rounded_rectangle([stem_x, top, stem_x + stem_w, bot], radius=stem_w * 0.4, fill=col)
+              d.rounded_rectangle([stem_x, bot - stem_w, stem_x + foot_w, bot], radius=stem_w * 0.4, fill=col)
+              out = img.resize((size, size), Image.LANCZOS)
+              return out
+
+          def with_bg(size, round_=False, square_pad=0.0):
+              bg = gradient(size, (124, 58, 237), (236, 72, 153)).convert("RGBA")
+              fg = logo(size, pad=square_pad)
+              bg.alpha_composite(fg)
+              mask = Image.new("L", (size, size), 0)
+              md = ImageDraw.Draw(mask)
+              if round_:
+                  md.ellipse([0, 0, size - 1, size - 1], fill=255)
+              else:
+                  md.rounded_rectangle([0, 0, size - 1, size - 1], radius=size * 0.22, fill=255)
+              out = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+              out.paste(bg, (0, 0), mask)
+              return out
+
+          dens_fg = {"mdpi":108,"hdpi":162,"xhdpi":216,"xxhdpi":324,"xxxhdpi":432}
+          dens_ic = {"mdpi":48,"hdpi":72,"xhdpi":96,"xxhdpi":144,"xxxhdpi":192}
+          main = "TMessagesProj/src/main/res"
+          sa = "TMessagesProj_AppStandalone/src/main/res"
+          for k, s in dens_fg.items():
+              # adaptive foreground: transparent, logo inside the 66% safe zone
+              logo(s, pad=0.04).save(f"{main}/mipmap-{k}/icon_foreground_sa.png")
+          for k, s in dens_ic.items():
+              with_bg(s).save(f"{sa}/mipmap-{k}/ic_launcher_sa.png")
+          logo(256, pad=0.0).save(f"{main}/drawable-nodpi/server_owpengram.png")
+          print("ok")
+          ICON_EOF
+          python3 mkicon.py
+
+      - name: Rebrand to Lowgram + ghost typing
+        env:
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
         run: |
-          keytool -genkey -v -keystore TMessagesProj/config/release.keystore \
-            -alias lowgram -keyalg RSA -keysize 2048 -validity 10000 \
-            -storepass lowgram123 -keypass lowgram123 \
-            -dname "CN=LowGram, OU=Dev, O=LowGram, L=City, S=State, C=US"
+          cat > rebrand.sh <<'REBRAND_EOF'
+          #!/usr/bin/env bash
+          # Lowgram rebrand: run from repo root.
+          set -euo pipefail
 
-      - name: Собираем APK
+          # --- 0) things that must NOT point at the original project ---
+          S=TMessagesProj/src/main/java/org/telegram/owpengram
+          sed -i 's|^\(\s*\)result.add(owpengramServer());|\1// built-in third-party server removed|' $S/OwpengramServers.java
+          sed -i 's|return ApplicationLoader.isStandaloneBuild() \&\& BuildVars.OWPENGRAM_BUILD > 0;|return false;|' $S/OwpengramUpdater.java
+          sed -i 's|SERVER_REPO_URL = "https://github.com/owpengram/owpengram-server"|SERVER_REPO_URL = ""|' $S/OwpengramServers.java
+
+          # --- 1) rename files/dirs (deepest first) ---
+          git mv TMessagesProj/src/main/java/org/telegram/owpengram TMessagesProj/src/main/java/org/telegram/lowgram
+          for f in $(git ls-files | grep -i owpengram | sort -r); do
+            [ -e "$f" ] || continue
+            n="$(dirname "$f")/$(basename "$f" | sed 's/Owpengram/Lowgram/g; s/owpengram/lowgram/g; s/OWPENGRAM/LOWGRAM/g')"
+            [ "$f" != "$n" ] && git mv "$f" "$n"
+          done
+
+          # --- 2) rewrite text (case-sensitive on purpose: 'allowPendingKey' etc. stay untouched) ---
+          git ls-files -z | xargs -0 grep -IlZ -e owpengram -e Owpengram -e OwpenGram -e OWPENGRAM 2>/dev/null \
+           | xargs -0 sed -i \
+             -e 's/OwpenGram/Lowgram/g' -e 's/Owpengram/Lowgram/g' \
+             -e 's/OWPENGRAM/LOWGRAM/g'  -e 's/owpengram/lowgram/g' || true
+
+          # README / links that would now point to non-existent places
+          rm -f README.md api_credentials.local.ps1.example
+          printf '# Lowgram for Android\n\nA personal Telegram-for-Android fork (GPL-2.0-or-later), based on https://github.com/DrKLO/Telegram\n' > README.md
+
+          # --- 3) own API credentials from CI secrets (never ship someone else's) ---
+          sed -i "s|APP_ID = 3893395;|APP_ID = ${TG_API_ID:?set TG_API_ID};|; s|APP_HASH = \"[0-9a-f]*\";|APP_HASH = \"${TG_API_HASH:?set TG_API_HASH}\";|" \
+            TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java
+
+          # --- 4) brand colours of the launcher background ---
+          sed -i 's/#289AD1/#7C3AED/; s/#38AEEB/#EC4899/' TMessagesProj/src/main/res/drawable/icon_background_sa.xml
+
+          # --- 5) leftover links ---
+          sed -i 's|https://t.me/LowgramTips|https://t.me/TelegramTips|' TMessagesProj/src/main/res/values/strings.xml
+          sed -i 's/me\.lowgram\.org/me.example.org/' TMessagesProj/src/main/java/org/telegram/ui/Stories/PeerStoriesView.java
+
+          # --- 6) FEATURE: Ghost typing (nobody sees "typing…" / "recording voice…" from you) ---
+          cat > TMessagesProj/src/main/java/org/telegram/lowgram/LowgramGhost.java <<'JAVA'
+          package org.telegram.lowgram;
+
+          import android.content.Context;
+          import android.content.SharedPreferences;
+
+          import org.telegram.messenger.ApplicationLoader;
+
+          /** Lowgram "ghost typing": when on, the client never tells others you are typing/recording. */
+          public class LowgramGhost {
+              private static final String PREFS = "lowgram_ghost";
+              private static final String KEY = "hide_typing";
+
+              private static SharedPreferences prefs() {
+                  return ApplicationLoader.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+              }
+
+              public static boolean hideTyping() {
+                  return prefs().getBoolean(KEY, true);
+              }
+
+              public static boolean toggleHideTyping() {
+                  boolean v = !hideTyping();
+                  prefs().edit().putBoolean(KEY, v).apply();
+                  return v;
+              }
+          }
+          JAVA
+
+          M=TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java
+          python3 - "$M" <<'PY'
+          import sys
+          p=sys.argv[1]; s=open(p,encoding='utf-8').read()
+          a="public boolean sendTyping(long dialogId, long threadMsgId, int action, String emojicon, int classGuid) {\n"
+          assert s.count(a)==1
+          s=s.replace(a, a+"        if (org.telegram.lowgram.LowgramGhost.hideTyping()) {\n            return false;\n        }\n")
+          open(p,'w',encoding='utf-8').write(s)
+          PY
+
+          T=TMessagesProj/src/main/java/org/telegram/ui/SettingsActivity.java
+          python3 - "$T" <<'PY'
+          import sys
+          p=sys.argv[1]; s=open(p,encoding='utf-8').read()
+          old='items.add(SettingCell.Factory.of(30, 0xFF6E7B86, 0xFF55606A, R.drawable.github_logo, "Lowgram"));'
+          assert s.count(old)==1
+          s=s.replace(old,'items.add(SettingCell.Factory.of(30, 0xFF7C3AED, 0xFF6D28D9, 0, "Ghost typing: " + (org.telegram.lowgram.LowgramGhost.hideTyping() ? "ON" : "OFF")));')
+          old2="Browser.openUrl(getParentActivity(), org.telegram.lowgram.LowgramServers.SERVER_REPO_URL);"
+          assert s.count(old2)==1
+          s=s.replace(old2,'''boolean ghostOn = org.telegram.lowgram.LowgramGhost.toggleHideTyping();
+                          Toast.makeText(getParentActivity(), "Ghost typing " + (ghostOn ? "ON" : "OFF"), Toast.LENGTH_SHORT).show();
+                          listView.adapter.update(true);''')
+          open(p,'w',encoding='utf-8').write(s)
+          PY
+          REBRAND_EOF
+          bash rebrand.sh
+
+      - name: Build APK
         run: |
           chmod +x gradlew
-          ./gradlew :TMessagesProj_AppStandalone:assembleRelease \
-            -PRELEASE_STORE_FILE=release.keystore \
-            -PRELEASE_STORE_PASSWORD=lowgram123 \
-            -PRELEASE_KEY_ALIAS=lowgram \
-            -PRELEASE_KEY_PASSWORD=lowgram123
+          ./gradlew --no-daemon :TMessagesProj_AppStandalone:assembleAfatStandalone --stacktrace
 
-      - name: Загружаем готовый APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: LowGram-APK
+          name: Lowgram-apk
           path: TMessagesProj_AppStandalone/build/outputs/apk/**/*.apk
-          
